@@ -1,6 +1,7 @@
 import * as dotenv from "dotenv";
 dotenv.config();
 
+import cors from "cors";
 import express, { Request, Response } from "express";
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import path from "path";
@@ -8,6 +9,7 @@ import fs from "fs";
 
 const app = express();
 app.use(express.json());
+app.use(cors());
 
 // Where we'll store the HLS output files
 const HLS_OUTPUT_DIR = path.join(__dirname, "hls");
