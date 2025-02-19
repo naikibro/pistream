@@ -1,4 +1,4 @@
 node_modules
-hls
 .env
 !.env.example
+hls/
