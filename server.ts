@@ -1,3 +1,6 @@
+import * as dotenv from "dotenv";
+dotenv.config();
+
 import express, { Request, Response } from "express";
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import path from "path";
@@ -12,6 +15,44 @@ if (!fs.existsSync(HLS_OUTPUT_DIR)) {
   fs.mkdirSync(HLS_OUTPUT_DIR);
 }
 
+app.get("/", (req, res) => {
+  const localIp = process.env.LOCAL_IP || "localhost"; // fallback if not set
+
+  // Construct an HTML string with the IP inserted
+  const htmlContent = `
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>HLS Test</title>
+  </head>
+  <body>
+    <video id="video" controls autoplay></video>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <script>
+      const video = document.getElementById("video");
+
+      if (Hls.isSupported()) {
+        const hls = new Hls();
+        // Use the env var IP here
+        hls.loadSource("http://${localIp}:3000/hls/index.m3u8");
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, function() {
+          video.play();
+        });
+      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        // Safari fallback
+        video.src = "http://${localIp}:3000/hls/index.m3u8";
+      }
+    </script>
+  </body>
+</html>
+  `;
+
+  // Send the constructed HTML to the browser
+  res.send(htmlContent);
+});
+
 // Track the FFmpeg child process globally
 let ffmpegProcess: ChildProcessWithoutNullStreams | null = null;
 
@@ -25,32 +66,28 @@ app.post("/start", (req: Request, res: Response) => {
     return res.status(400).json({ error: "Stream is already running" });
   }
 
-  // Clean out old segments, if any
+  // Clean out old segments
   fs.readdirSync(HLS_OUTPUT_DIR).forEach((file) => {
     fs.unlinkSync(path.join(HLS_OUTPUT_DIR, file));
   });
 
-  // You can adjust the input depending on your camera setup:
-  // - Official Pi camera (libcamera): "libcamera-vid" is not a direct FFmpeg input, so you might use v4l2 or pipe from libcamera.
-  // - Older raspivid-based setups: you might pipe raspivid into ffmpeg.
-  // - USB camera: usually /dev/video0 with v4l2.
-
-  // This example uses /dev/video0 with hardware h264 encoding (if available).
-  // If hardware encoding doesn't work on your Pi version, you can do '-c:v libx264'.
+  // --------------------------------------------
+  // Use testsrc for color bars instead of /dev/video0
+  // --------------------------------------------
   const ffmpegArgs = [
-    "-y", // Overwrite output
+    "-y",
     "-f",
-    "v4l2",
+    "lavfi",
     "-i",
-    "/dev/video0",
-    // Encoding
+    "testsrc=size=640x480:rate=30",
     "-c:v",
-    "h264_v4l2m2m", // or 'libx264' or 'omxh264' (older Pi) if needed
-    // Output to HLS
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
     "-f",
     "hls",
     "-hls_time",
-    "2", // 2-second segments
+    "2",
     "-hls_list_size",
     "5",
     "-hls_segment_filename",
@@ -70,7 +107,7 @@ app.post("/start", (req: Request, res: Response) => {
   });
 
   return res.json({
-    message: "HLS stream started. Files are being generated in /hls folder.",
+    message: "HLS stream started. Now generating color bars in /hls folder.",
   });
 });
 
