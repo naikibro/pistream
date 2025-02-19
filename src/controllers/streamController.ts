@@ -1,97 +1,127 @@
-import { spawn } from "child_process";
+import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { Request, Response } from "express";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { HLS_OUTPUT_DIR } from "../server";
+import UsbCameraService from "../services/UsbCameraService";
 
-let captureInterval: NodeJS.Timeout | null = null;
-let frameCounter = 0;
+let ffmpegProcess: ChildProcessWithoutNullStreams | null = null;
 
 /**
  * POST /start
- * Captures **one image every 3 seconds** with an incrementing frame counter.
+ * Starts streaming from the USB camera or falls back to color bars.
  */
 export function startStream(req: Request, res: Response) {
-  if (captureInterval) {
-    return res.status(400).json({ error: "Capture is already running" });
+  if (ffmpegProcess) {
+    return res.status(400).json({ error: "Stream is already running" });
   }
 
-  console.log("📸 Starting image capture every 3 seconds...");
+  const cameraDevice = UsbCameraService.getCameraDevice();
+  let inputSource: string;
+  let inputFormat: string;
+  let ffmpegArgs: string[];
 
-  fs.readdirSync(HLS_OUTPUT_DIR).forEach((file) => {
-    if (file.endsWith(".jpg")) {
-      fs.unlinkSync(path.join(HLS_OUTPUT_DIR, file));
+  if (cameraDevice) {
+    if (os.platform() === "darwin") {
+      inputFormat = "avfoundation";
+      inputSource = cameraDevice;
+      ffmpegArgs = ["-framerate", "30"];
+    } else {
+      inputFormat = "v4l2";
+      inputSource = cameraDevice;
+      ffmpegArgs = [
+        "-video_size",
+        "640x480",
+        "-framerate",
+        "30",
+        "-input_format",
+        "yuyv422",
+      ];
     }
+  } else {
+    inputFormat = "lavfi";
+    inputSource = "testsrc=size=640x480:rate=30";
+    ffmpegArgs = [];
+  }
+
+  console.log(
+    `🎥 Streaming from: ${
+      cameraDevice ? `Camera (${inputSource})` : "Test Pattern"
+    }`
+  );
+
+  ffmpegArgs.push(
+    "-y",
+    "-f",
+    inputFormat,
+    "-i",
+    inputSource,
+    "-c:v",
+    "libx264",
+    "-preset",
+    "ultrafast",
+    "-tune",
+    "zerolatency",
+    "-profile:v",
+    "baseline",
+    "-level",
+    "3.0",
+    "-pix_fmt",
+    "yuv420p",
+    "-hls_time",
+    "2",
+    "-hls_list_size",
+    "15",
+    "-hls_flags",
+    "append_list+delete_segments",
+    "-start_number",
+    "1",
+    "-hls_segment_filename",
+    path.join(HLS_OUTPUT_DIR, "segment_%d.ts"),
+    path.join(HLS_OUTPUT_DIR, "index.m3u8")
+  );
+
+  ffmpegProcess = spawn("ffmpeg", ffmpegArgs);
+
+  ffmpegProcess.stderr.on("data", (data) => {
+    console.log(`[FFmpeg] ${data.toString()}`);
   });
 
-  const captureImage = () => {
-    frameCounter++;
-
-    const tempImagePath = path.join(HLS_OUTPUT_DIR, "temp.jpg");
-    const finalImagePath = path.join(HLS_OUTPUT_DIR, "latest.jpg");
-    console.log(`📷 Capturing a new image... Frame: ${frameCounter}`);
-
-    const ffmpegArgs = [
-      "-y",
-      "-f",
-      "lavfi",
-      "-i",
-      "testsrc=size=640x480:rate=1",
-      "-frames:v",
-      "1",
-      "-q:v",
-      "2",
-      "-vf",
-      `drawtext=text='Frame\\: ${frameCounter}': fontcolor=white: fontsize=48: x=50: y=50`,
-      tempImagePath,
-    ];
-
-    const ffmpegProcess = spawn("ffmpeg", ffmpegArgs);
-
-    ffmpegProcess.stderr.on("data", (data) => {
-      console.log(`[FFmpeg] ${data}`);
-    });
-
-    ffmpegProcess.on("close", (code) => {
-      if (code !== 0) {
-        console.error(`❌ FFmpeg process exited with code ${code}`);
-      } else {
-        try {
-          if (fs.existsSync(tempImagePath)) {
-            fs.renameSync(tempImagePath, finalImagePath);
-            console.log("✅ Image updated successfully with frame counter!");
-          }
-        } catch (error) {
-          console.error("❌ Failed to update latest.jpg:", error);
-        }
-      }
-    });
-  };
-
-  captureImage();
-  captureInterval = setInterval(captureImage, 3000);
-
-  return res.json({
-    message:
-      "📸 Capturing an image every 3 seconds with an incrementing number.",
+  ffmpegProcess.on("error", (err) => {
+    console.error("❌ FFmpeg failed to start:", err);
   });
+
+  ffmpegProcess.on("close", (code) => {
+    console.log(`[FFmpeg] Process exited with code ${code}`);
+    ffmpegProcess = null;
+  });
+
+  return res.json({ message: "🎥 Stream started." });
 }
 
 /**
  * POST /stop
- * Stops capturing images.
+ * Stops the current stream.
  */
 export function stopStream(req: Request, res: Response) {
-  if (!captureInterval) {
-    return res.status(400).json({ error: "No capture is currently running" });
+  if (!ffmpegProcess) {
+    return res.status(400).json({ error: "No stream is currently running" });
   }
 
-  clearInterval(captureInterval);
-  captureInterval = null;
-  console.log("🛑 Image capture stopped.");
-  frameCounter = 0;
+  ffmpegProcess.kill("SIGINT");
+  ffmpegProcess = null;
+  console.log("🛑 Stream stopped.");
 
-  return res.json({ message: "🛑 Image capture stopped." });
+  return res.json({ message: "🛑 Stream stopped." });
+}
+
+/**
+ * GET /status
+ * Returns the current stream status.
+ */
+export function getStatus(req: Request, res: Response) {
+  return res.json({ status: ffmpegProcess ? "running" : "stopped" });
 }
 
 /**
@@ -106,12 +136,4 @@ export function getLatestImage(req: Request, res: Response) {
   }
 
   res.sendFile(imagePath);
-}
-
-/**
- * GET /status
- * Returns whether FFmpeg is capturing images or not.
- */
-export function getStatus(req: Request, res: Response) {
-  return res.json({ status: captureInterval ? "capturing" : "stopped" });
 }

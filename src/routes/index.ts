@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, Request, Response } from "express";
 import { getHome } from "../controllers/homeController";
 import {
   startStream,
@@ -6,6 +6,8 @@ import {
   getStatus,
   getLatestImage,
 } from "../controllers/streamController";
+import UsbCameraService from "../services/UsbCameraService";
+import { spawn } from "child_process";
 
 const router = Router();
 
@@ -34,6 +36,7 @@ router.get("/", getHome);
  *         description: Capture is already running
  */
 router.post("/start", startStream);
+router.get("/start", startStream);
 
 /**
  * @swagger
@@ -74,5 +77,35 @@ router.get("/status", getStatus);
  *         description: No image available
  */
 router.get("/image", getLatestImage);
+
+router.get("/stream", (req: Request, res: Response) => {
+  res.setHeader("Content-Type", "multipart/x-mixed-replace; boundary=frame");
+
+  const ffmpegArgs = [
+    "-f",
+    "v4l2",
+    "-i",
+    UsbCameraService.getCameraDevice() || "/dev/video0",
+    "-f",
+    "mjpeg",
+    "pipe:1",
+  ];
+
+  const ffmpegProcess = spawn("ffmpeg", ffmpegArgs);
+
+  ffmpegProcess.stdout.on("data", (chunk) => {
+    res.write(`--frame\r\nContent-Type: image/jpeg\r\n\r\n`);
+    res.write(chunk);
+    res.write("\r\n");
+  });
+
+  ffmpegProcess.stderr.on("data", (data) => {
+    console.error("FFmpeg error:", data.toString());
+  });
+
+  req.on("close", () => {
+    ffmpegProcess.kill();
+  });
+});
 
 export default router;

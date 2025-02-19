@@ -16,7 +16,7 @@ export function getHome(req: Request, res: Response) {
     <title>HLS Test</title>
   </head>
   <body>
-    <video id="video" controls autoplay></video>
+    <video id="video" controls></video>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script>
       const video = document.getElementById("video");
